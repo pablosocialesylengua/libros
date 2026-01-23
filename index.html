@@ -10138,6 +10138,9 @@ let currentBookIndex = null;
 let fontSize = 18;
 let darkMode = false;
 
+let selectedAuthor = null;
+
+
 // Buscador
 let searchQuery = "";
 let searchInFullText = false; // por defecto: solo título/autor
@@ -10181,12 +10184,11 @@ function normalize(str){
 }
 
 function authorKey(name) {
-  return (name || "sin autor")
+  return String(name || "sin autor")
     .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")   // saca tildes
-    .replace(/[^a-z0-9]+/g, "_")       // espacios y signos -> _
-    .replace(/^_+|_+$/g, "");          // limpia _ al inicio/fin
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // saca tildes
+    .replace(/[^a-z0-9]+/g, "_")                      // todo a _
+    .replace(/^_+|_+$/g, "");                         // limpia _ al inicio/fin
 }
 
 function authorSortKey(name) {
@@ -10405,18 +10407,43 @@ function updateAudioButtons() {
 // =========================
 // 7) BIBLIOTECA + BUSCADOR
 // =========================
+
 function getFilteredBooks() {
   const q = normalize(searchQuery).trim();
-  if (!q) return BOOKS.map((b, idx) => ({ ...b, __idx: idx }));
 
-  return BOOKS
-    .map((b, idx) => ({ ...b, __idx: idx }))
-    .filter(b => {
-      const hay = normalize(b.title) + " " + normalize(b.author);
-      if (hay.includes(q)) return true;
-      if (searchInFullText) return normalize(b.text).includes(q);
-      return false;
-    });
+  // Base: todos los libros con índice real
+  let base = BOOKS.map((b, idx) => ({ ...b, __idx: idx }));
+
+  // Si estoy adentro de un autor, filtro por ese autor (comparación normalizada)
+  if (selectedAuthor) {
+    const a = normalize(selectedAuthor).trim();
+    base = base.filter(b => normalize(b.author || "").trim() === a);
+  }
+
+  // Si no hay búsqueda, devuelvo base tal cual
+  if (!q) return base;
+
+  // Búsqueda por título/autor (y opcional texto completo)
+  return base.filter(b => {
+    const title = normalize(b.title || "");
+    const author = normalize(b.author || "");
+    if (title.includes(q) || author.includes(q)) return true;
+    if (searchInFullText) return normalize(b.text || "").includes(q);
+    return false;
+  });
+}
+
+function getAuthors() {
+  const map = {};
+  BOOKS.forEach(b => {
+    if (!b.author) return;
+    const key = authorKey(b.author);
+    map[key] = b.author; // guarda el "display name" original
+  });
+
+  return Object.values(map).sort((a, b) =>
+    a.localeCompare(b, "es", { sensitivity: "base" })
+  );
 }
 
 function showLibrary() {
@@ -10433,29 +10460,65 @@ function showLibrary() {
       <div class="search">
         🔎
         <input id="searchInput" type="search" placeholder="Buscar por título o autor..." />
-        <button class="clear" id="btnClear">✖</button>
+        <button class="clear" id="btnClear" title="Limpiar">✖</button>
       </div>
-      <span class="pill" id="countPill"></span>
-      <button class="secondary" id="btnScope"></button>
+
+      <button class="secondary" id="btnBack" style="display:none;">⬅ Volver</button>
+      <button class="secondary" id="btnScope" title="Cambiar alcance">
+        ${searchInFullText ? "Incluye texto ✅" : "Solo título/autor"}
+      </button>
     </div>
+
     <div class="grid" id="grid"></div>
-    <div id="empty" class="empty" style="display:none;">No hay resultados</div>
+    <div id="empty" class="empty" style="display:none;">No hay resultados. Probá con otra búsqueda.</div>
   `;
 
   const input = document.getElementById("searchInput");
   const btnClear = document.getElementById("btnClear");
+  const btnBack = document.getElementById("btnBack");
   const btnScope = document.getElementById("btnScope");
   const grid = document.getElementById("grid");
   const empty = document.getElementById("empty");
 
-  function renderGrid() {
+  function renderAuthors() {
+    grid.innerHTML = "";
+    empty.style.display = "none";
+    btnBack.style.display = "none";
+
+    const authors = getAuthors();
+
+    if (authors.length === 0) {
+      empty.style.display = "block";
+      return;
+    }
+
+    authors.forEach(author => {
+      const key = authorKey(author);
+
+      const card = document.createElement("div");
+      card.className = "card author-card";
+      card.onclick = () => {
+        selectedAuthor = author;
+        renderBooks();
+      };
+
+      card.innerHTML = `
+        <img class="cover" src="covers/author_${key}.jpg" alt="${escapeHtml(author)}"
+             onerror="this.style.display='none'">
+        <div class="meta">
+          <p class="title">${escapeHtml(author)}</p>
+        </div>
+      `;
+
+      grid.appendChild(card);
+    });
+  }
+
+  function renderBooks() {
     const list = getFilteredBooks();
 
-    document.getElementById("countPill").textContent =
-      `${list.length} / ${BOOKS.length}`;
-    btnScope.textContent = searchInFullText ? "Incluye texto ✅" : "Solo título/autor";
-
     grid.innerHTML = "";
+    btnBack.style.display = "inline-block";
 
     if (list.length === 0) {
       empty.style.display = "block";
@@ -10463,67 +10526,83 @@ function showLibrary() {
     }
     empty.style.display = "none";
 
-    const ordered = list.slice().sort((a, b) => {
-      const aA = authorSortKey(a.author);
-      const bA = authorSortKey(b.author);
-      if (aA !== bA) return aA.localeCompare(bA, "es");
-      return (a.title || "").localeCompare(b.title || "", "es");
-    });
+    // Orden alfabético por título
+    list.sort((a, b) =>
+      (a.title || "").localeCompare((b.title || ""), "es", { sensitivity: "base" })
+    );
 
-    let lastAuthorKey = null;
-
-    ordered.forEach(b => {
-      const authorName = b.author || "Sin autor";
-      const key = authorKey(authorName);
-
-      if (key !== lastAuthorKey) {
-        lastAuthorKey = key;
-
-        const aCard = document.createElement("div");
-        aCard.className = "card author-card";
-        aCard.innerHTML = `
-          <img class="cover" src="covers/autor_${key}.jpg"
-               onerror="this.style.display='none'">
-          <div class="meta">
-            <p class="title">${escapeHtml(authorName)}</p>
-            <p class="author">Autor</p>
-          </div>
-        `;
-        grid.appendChild(aCard);
-      }
-
+    list.forEach(b => {
       const card = document.createElement("div");
       card.className = "card";
       card.onclick = () => openBook(b.__idx);
+
       card.innerHTML = `
-        <img class="cover" src="${b.cover}" onerror="this.style.display='none'">
+        <img class="cover" src="${b.cover}" alt="${escapeHtml(b.title)}"
+             onerror="this.style.display='none'">
         <div class="meta">
-          <p class="title">${escapeHtml(b.title)}</p>
+          <p class="title">${escapeHtml(b.title || "")}</p>
           <p class="author">${escapeHtml(b.author || "")}</p>
         </div>
       `;
+
       grid.appendChild(card);
     });
   }
 
-  input.addEventListener("input", () => {
-    searchQuery = input.value || "";
-    renderGrid();
-  });
-
-  btnClear.addEventListener("click", () => {
+  // Volver a autores
+  btnBack.onclick = () => {
+    selectedAuthor = null;
     searchQuery = "";
     input.value = "";
-    renderGrid();
+    renderAuthors();
+  };
+
+  // Buscar
+  input.addEventListener("input", () => {
+    searchQuery = input.value || "";
+
+    // En autores:
+    // - vacío => autores
+    // - con texto => cuentos filtrados (global)
+    if (!selectedAuthor) {
+      if (searchQuery.trim() === "") renderAuthors();
+      else renderBooks();
+      return;
+    }
+
+    // Dentro de un autor => filtra dentro del autor
+    renderBooks();
   });
 
-  btnScope.addEventListener("click", () => {
+  // Limpiar
+  btnClear.onclick = () => {
+    searchQuery = "";
+    input.value = "";
+
+    if (!selectedAuthor) renderAuthors();
+    else renderBooks();
+
+    input.focus();
+  };
+
+  // Toggle alcance (título/autor vs texto completo)
+  btnScope.onclick = () => {
     searchInFullText = !searchInFullText;
-    renderGrid();
-  });
+    btnScope.textContent = searchInFullText ? "Incluye texto ✅" : "Solo título/autor";
 
-  renderGrid();
+    if (!selectedAuthor) {
+      if (searchQuery.trim() === "") renderAuthors();
+      else renderBooks();
+    } else {
+      renderBooks();
+    }
+  };
+
+  // Inicio
+  renderAuthors();
+  setTimeout(() => input.focus(), 50);
 }
+
 
 // =========================
 // 8) LECTOR
